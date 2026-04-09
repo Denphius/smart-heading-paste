@@ -66,10 +66,41 @@
 
 ## 开发
 
+### 环境要求
+
+- Node.js 16+
+- npm 或 pnpm
+
+### 编译步骤
+
 ```bash
+# 1. 安装依赖
 npm install
-npm run dev      # 开发模式，监听变更
-npm run build    # 生产构建
+
+# 2. 开发模式（自动监听文件变更并编译）
+npm run dev
+
+# 3. 生产构建（生成 main.js）
+npm run build
+```
+
+### 编译产物
+
+运行 `npm run build` 后，会在项目根目录生成 `main.js`，这是 Obsidian 实际加载的插件代码。
+
+发布插件时，需要把以下三个文件一同提供：
+
+- `main.js` — 编译后的插件代码（运行 `npm run build` 生成）
+- `manifest.json` — 插件元数据
+- `styles.css` — 插件样式（本插件当前为空文件，预留）
+
+### 本地测试
+
+构建完成后，将上述三个文件复制到任意 Vault 的插件目录即可测试：
+
+```bash
+cp main.js manifest.json styles.css \
+  /path/to/your/vault/.obsidian/plugins/smart-heading-paste/
 ```
 
 ## 许可
