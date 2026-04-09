@@ -34,27 +34,28 @@ var DEFAULT_SETTINGS = {
   maxHeadingLevel: 6,
   skipCodeBlocks: true
 };
+var LEADING_NOISE_RE = /^[\s\p{Cf}\p{Zs}]*/u;
+var HEADING_LEVEL_FROM_START_RE = /^(#{1,6}|＃{1,6})(?:[\s\p{Cf}\p{Zs}]|$)/u;
+var HEADING_PARSE_RE = /^([\s\p{Cf}\p{Zs}]*)((?:#{1,6}|＃{1,6}))(.*)$/u;
 var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
+    this.lastPastedText = "";
+    this.lastPasteTime = 0;
     // ==================== 核心粘贴处理器 ====================
     this.handlePaste = (event, editor, view) => {
-      if (event.defaultPrevented) {
-        console.log("Smart Heading Paste: paste event already handled by another plugin");
+      this.processPasteEvent(event, editor, "editor-paste");
+    };
+    this.handleDomPaste = (event) => {
+      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      if (!activeView)
         return;
-      }
-      const clipboardData = event.clipboardData;
-      if (!clipboardData)
+      const activeElement = document.activeElement;
+      if (!(activeElement instanceof HTMLElement))
         return;
-      const pastedText = clipboardData.getData("text/plain");
-      if (!this.containsMarkdownHeadings(pastedText)) {
+      if (!activeElement.closest(".markdown-source-view, .cm-editor, .cm-content"))
         return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      const cursor = editor.getCursor();
-      console.log("Smart Heading Paste: intercepting paste");
-      this.performSmartPaste(editor, pastedText, cursor.line);
+      this.processPasteEvent(event, activeView.editor, "dom-paste");
     };
   }
   async onload() {
@@ -63,6 +64,7 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.workspace.on("editor-paste", this.handlePaste)
     );
+    this.registerDomEvent(document, "paste", this.handleDomPaste);
     this.addSettingTab(new SmartPasteSettingTab(this.app, this));
     this.addCommand({
       id: "smart-paste-command",
@@ -82,11 +84,41 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
   }
+  processPasteEvent(event, editor, source) {
+    if (event.defaultPrevented) {
+      console.log(`Smart Heading Paste (${source}): paste marked handled, still checking`);
+    }
+    const clipboardData = event.clipboardData;
+    if (!clipboardData)
+      return;
+    const pastedText = clipboardData.getData("text/plain");
+    if (!pastedText)
+      return;
+    const now = Date.now();
+    if (pastedText === this.lastPastedText && now - this.lastPasteTime < 250) {
+      event.preventDefault();
+      event.stopPropagation();
+      console.log(`Smart Heading Paste (${source}): deduping duplicate paste event`);
+      return;
+    }
+    if (!this.containsMarkdownHeadings(pastedText)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.lastPastedText = pastedText;
+    this.lastPasteTime = now;
+    console.log(`Smart Heading Paste (${source}): intercepting paste`);
+    const cursor = editor.getCursor();
+    this.performSmartPaste(editor, pastedText, cursor.line);
+  }
   // ==================== 手动智能粘贴 ====================
   async manualSmartPaste(editor) {
     try {
       const text = await navigator.clipboard.readText();
+      console.log("[Smart Heading Paste] \u624B\u52A8\u7C98\u8D34\u89E6\u53D1");
       if (!this.containsMarkdownHeadings(text)) {
+        console.log("[Smart Heading Paste] \u624B\u52A8\u7C98\u8D34\u5185\u5BB9\u65E0\u6807\u9898\uFF0C\u76F4\u63A5\u63D2\u5165");
         editor.replaceSelection(text);
         return;
       }
@@ -99,11 +131,14 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
   // ==================== 核心逻辑 ====================
   performSmartPaste(editor, content, currentLine) {
     const contextLevel = this.getContextHeadingLevel(editor, currentLine);
+    console.log(`[Smart Heading Paste] \u4E0A\u6587\u6807\u9898\u5C42\u7EA7: ${contextLevel === 0 ? "\u65E0 (\u6587\u6863\u6839)" : "H" + contextLevel}`);
     const parsed = this.parseHeadings(content);
     if (!parsed.hasHeading) {
+      console.log("[Smart Heading Paste] \u7C98\u8D34\u5185\u5BB9\u65E0\u6807\u9898\uFF0C\u76F4\u63A5\u63D2\u5165");
       editor.replaceSelection(content);
       return;
     }
+    console.log(`[Smart Heading Paste] \u7C98\u8D34\u5185\u5BB9\u6807\u9898\u7EDF\u8BA1: \u6700\u5C0FH${parsed.minLevel}, \u6700\u5927H${parsed.maxLevel}, \u5171${parsed.headings.length}\u4E2A\u6807\u9898`);
     let targetBaseLevel;
     if (contextLevel === 0) {
       targetBaseLevel = this.settings.avoidH1WhenNoContext ? 2 : 1;
@@ -112,11 +147,14 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
     }
     targetBaseLevel = Math.max(1, Math.min(this.settings.maxHeadingLevel, targetBaseLevel));
     const offset = targetBaseLevel - parsed.minLevel;
+    console.log(`[Smart Heading Paste] \u76EE\u6807\u5C42\u7EA7: H${targetBaseLevel}, \u539F\u59CB\u6700\u5C0F\u5C42\u7EA7: H${parsed.minLevel}, \u504F\u79FB\u91CF: ${offset > 0 ? "+" : ""}${offset}`);
     const adjustedContent = this.applyHeadingOffset(
       content,
       offset,
       this.settings.skipCodeBlocks
     );
+    const hasModified = adjustedContent !== content;
+    console.log(`[Smart Heading Paste] \u662F\u5426\u505A\u4E86\u4FEE\u6539: ${hasModified ? "\u662F" : "\u5426"}`);
     editor.replaceSelection(adjustedContent);
     if (this.settings.showNotification) {
       const contextStr = contextLevel === 0 ? "\u6587\u6863\u6839" : `H${contextLevel}`;
@@ -129,7 +167,7 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
    * 检查文本是否包含 Markdown 标题（排除代码块）
    */
   containsMarkdownHeadings(text) {
-    const lines = text.split("\n");
+    const lines = text.split(/\r\n|\r|\n/);
     let inCodeBlock = false;
     for (const line of lines) {
       const trimmed = line.trim();
@@ -137,7 +175,7 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
         inCodeBlock = !inCodeBlock;
         continue;
       }
-      if (!inCodeBlock && /^\s*#{1,6}\s+/.test(line)) {
+      if (!inCodeBlock && this.extractHeadingLevel(line) > 0) {
         return true;
       }
     }
@@ -165,18 +203,20 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
       }
       if (inCodeBlock)
         continue;
-      const match = line.match(/^\s*(#{1,6})\s+/);
-      if (match) {
-        return match[1].length;
+      const level = this.extractHeadingLevel(line);
+      if (level > 0) {
+        console.log(`[Smart Heading Paste] \u627E\u5230\u4E0A\u6587\u6807\u9898: H${level} at line ${i + 1}: ${line.trim()}`);
+        return level;
       }
     }
+    console.log("[Smart Heading Paste] \u672A\u627E\u5230\u4E0A\u6587\u6807\u9898\uFF0C\u8FD4\u56DE\u6587\u6863\u6839");
     return 0;
   }
   /**
    * 解析粘贴内容中的标题信息
    */
   parseHeadings(content) {
-    const lines = content.split("\n");
+    const lines = content.split(/\r\n|\r|\n/);
     let inCodeBlock = false;
     let minLevel = 6;
     let maxLevel = 1;
@@ -190,13 +230,13 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
         continue;
       }
       if (!inCodeBlock || !this.settings.skipCodeBlocks) {
-        const match = line.match(/^\s*(#{1,6})\s+(.*)$/);
-        if (match) {
-          const level = match[1].length;
+        const parsedLine = this.parseHeadingLine(line);
+        if (parsedLine) {
+          const level = parsedLine.level;
           hasHeading = true;
           minLevel = Math.min(minLevel, level);
           maxLevel = Math.max(maxLevel, level);
-          headings.push({ line: i, level, text: match[2] });
+          headings.push({ line: i, level, text: parsedLine.content.trim() });
         }
       }
     }
@@ -208,11 +248,13 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
    * @param skipCodeBlocks 是否跳过代码块内的标题
    */
   applyHeadingOffset(content, offset, skipCodeBlocks) {
-    if (offset === 0)
+    if (offset === 0) {
+      console.log("[Smart Heading Paste] applyHeadingOffset: \u504F\u79FB\u91CF\u4E3A0\uFF0C\u65E0\u9700\u8C03\u6574");
       return content;
-    const lines = content.split("\n");
+    }
+    const lines = content.split(/\r\n|\r|\n/);
     let inCodeBlock = false;
-    return lines.map((line) => {
+    return lines.map((line, index) => {
       const trimmed = line.trim();
       if (trimmed.startsWith("```")) {
         inCodeBlock = !inCodeBlock;
@@ -220,17 +262,45 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
       }
       if (inCodeBlock && skipCodeBlocks)
         return line;
-      const match = line.match(/^(\s*)(#{1,6})(\s+.*)$/);
-      if (match) {
-        const indent = match[1];
-        const currentLevel = match[2].length;
-        const content2 = match[3];
+      const parsedLine = this.parseHeadingLine(line);
+      if (parsedLine) {
+        const indent = parsedLine.prefix;
+        const currentLevel = parsedLine.level;
+        const content2 = parsedLine.content;
         let newLevel = currentLevel + offset;
         newLevel = Math.max(1, Math.min(this.settings.maxHeadingLevel, newLevel));
-        return indent + "#".repeat(newLevel) + content2;
+        const result = indent + "#".repeat(newLevel) + content2;
+        console.log(`[Smart Heading Paste] \u8C03\u6574\u7B2C${index + 1}\u884C: H${currentLevel} -> H${newLevel} | ${result.trim()}`);
+        return result;
       }
       return line;
     }).join("\n");
+  }
+  /**
+   * 从行首提取 ATX 标题级别（1-6），无法识别返回 0
+   */
+  extractHeadingLevel(line) {
+    const normalized = line.replace(LEADING_NOISE_RE, "");
+    const match = normalized.match(HEADING_LEVEL_FROM_START_RE);
+    return match ? match[1].replace(/＃/g, "#").length : 0;
+  }
+  /**
+   * 解析一行标题，返回前缀、级别和标题正文
+   */
+  parseHeadingLine(line) {
+    var _a;
+    const match = line.match(HEADING_PARSE_RE);
+    if (!match)
+      return null;
+    const rest = (_a = match[3]) != null ? _a : "";
+    if (rest.length > 0 && !/^[\s\p{Cf}\p{Zs}]/u.test(rest)) {
+      return null;
+    }
+    return {
+      prefix: match[1],
+      level: match[2].replace(/＃/g, "#").length,
+      content: rest
+    };
   }
 };
 var SmartPasteSettingTab = class extends import_obsidian.PluginSettingTab {

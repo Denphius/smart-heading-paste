@@ -27,9 +27,19 @@ const DEFAULT_SETTINGS: SmartPasteSettings = {
   skipCodeBlocks: true,
 };
 
+// Web/chat copied text may contain invisible prefix chars before '#'.
+// We normalize these chars so heading matching remains stable.
+const LEADING_NOISE_RE = /^[\s\p{Cf}\p{Zs}]*/u;
+// Keep detection and parsing aligned to avoid false "no heading" results.
+// Some copy sources may inject zero-width chars or omit the usual space after '#'.
+const HEADING_LEVEL_FROM_START_RE = /^(#{1,6}|＃{1,6})(?:[\s\p{Cf}\p{Zs}]|$)/u;
+const HEADING_PARSE_RE = /^([\s\p{Cf}\p{Zs}]*)((?:#{1,6}|＃{1,6}))(.*)$/u;
+
 // ==================== 主插件类 ====================
 export default class SmartHeadingPastePlugin extends Plugin {
   settings: SmartPasteSettings;
+  private lastPastedText = '';
+  private lastPasteTime = 0;
 
   async onload() {
     await this.loadSettings();
@@ -40,6 +50,9 @@ export default class SmartHeadingPastePlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on('editor-paste', this.handlePaste)
     );
+
+    // DOM paste 兜底：某些场景下 editor-paste 可能不稳定
+    this.registerDomEvent(document, 'paste', this.handleDomPaste);
 
     // 添加设置面板
     this.addSettingTab(new SmartPasteSettingTab(this.app, this));
@@ -69,39 +82,70 @@ export default class SmartHeadingPastePlugin extends Plugin {
 
   // ==================== 核心粘贴处理器 ====================
   private handlePaste = (event: ClipboardEvent, editor: Editor, view: MarkdownView) => {
-    // 如果其他插件已经处理了粘贴事件，不重复拦截
+    this.processPasteEvent(event, editor, 'editor-paste');
+  };
+
+  private handleDomPaste = (event: ClipboardEvent) => {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!activeView) return;
+
+    const activeElement = document.activeElement;
+    if (!(activeElement instanceof HTMLElement)) return;
+    if (!activeElement.closest('.markdown-source-view, .cm-editor, .cm-content')) return;
+
+    this.processPasteEvent(event, activeView.editor, 'dom-paste');
+  };
+
+  private processPasteEvent(event: ClipboardEvent, editor: Editor, source: 'editor-paste' | 'dom-paste') {
+    // 即使其他插件已标记 defaultPrevented，也继续尝试识别并处理，
+    // 避免在某些编辑模式中错过真正的粘贴内容。
     if (event.defaultPrevented) {
-      console.log('Smart Heading Paste: paste event already handled by another plugin');
-      return;
+      console.log(`Smart Heading Paste (${source}): paste marked handled, still checking`);
     }
 
     const clipboardData = event.clipboardData;
     if (!clipboardData) return;
 
     const pastedText = clipboardData.getData('text/plain');
+    if (!pastedText) return;
+
+    const now = Date.now();
+
+    // 防抖去重：多个事件源可能在同一次粘贴中重复触发
+    if (pastedText === this.lastPastedText && now - this.lastPasteTime < 250) {
+      event.preventDefault();
+      event.stopPropagation();
+      console.log(`Smart Heading Paste (${source}): deduping duplicate paste event`);
+      return;
+    }
 
     // 快速检查：是否包含 Markdown 标题
     if (!this.containsMarkdownHeadings(pastedText)) {
-      return; // 让默认逻辑处理
+      return; // 无标题则让默认粘贴继续
     }
 
     // 阻止默认粘贴
     event.preventDefault();
     event.stopPropagation();
 
-    const cursor = editor.getCursor();
+    this.lastPastedText = pastedText;
+    this.lastPasteTime = now;
 
-    console.log('Smart Heading Paste: intercepting paste');
+    console.log(`Smart Heading Paste (${source}): intercepting paste`);
+
+    const cursor = editor.getCursor();
 
     // 执行智能调整
     this.performSmartPaste(editor, pastedText, cursor.line);
-  };
+  }
 
   // ==================== 手动智能粘贴 ====================
   private async manualSmartPaste(editor: Editor) {
     try {
       const text = await navigator.clipboard.readText();
+      console.log('[Smart Heading Paste] 手动粘贴触发');
       if (!this.containsMarkdownHeadings(text)) {
+        console.log('[Smart Heading Paste] 手动粘贴内容无标题，直接插入');
         editor.replaceSelection(text);
         return;
       }
@@ -116,13 +160,16 @@ export default class SmartHeadingPastePlugin extends Plugin {
   private performSmartPaste(editor: Editor, content: string, currentLine: number) {
     // 1. 获取上下文标题级别
     const contextLevel = this.getContextHeadingLevel(editor, currentLine);
+    console.log(`[Smart Heading Paste] 上文标题层级: ${contextLevel === 0 ? '无 (文档根)' : 'H' + contextLevel}`);
 
     // 2. 解析粘贴内容
     const parsed = this.parseHeadings(content);
     if (!parsed.hasHeading) {
+      console.log('[Smart Heading Paste] 粘贴内容无标题，直接插入');
       editor.replaceSelection(content);
       return;
     }
+    console.log(`[Smart Heading Paste] 粘贴内容标题统计: 最小H${parsed.minLevel}, 最大H${parsed.maxLevel}, 共${parsed.headings.length}个标题`);
 
     // 3. 计算目标层级
     let targetBaseLevel: number;
@@ -140,6 +187,7 @@ export default class SmartHeadingPastePlugin extends Plugin {
 
     // 4. 计算偏移量
     const offset = targetBaseLevel - parsed.minLevel;
+    console.log(`[Smart Heading Paste] 目标层级: H${targetBaseLevel}, 原始最小层级: H${parsed.minLevel}, 偏移量: ${offset > 0 ? '+' : ''}${offset}`);
 
     // 5. 生成调整后的内容
     const adjustedContent = this.applyHeadingOffset(
@@ -147,6 +195,9 @@ export default class SmartHeadingPastePlugin extends Plugin {
       offset,
       this.settings.skipCodeBlocks
     );
+
+    const hasModified = adjustedContent !== content;
+    console.log(`[Smart Heading Paste] 是否做了修改: ${hasModified ? '是' : '否'}`);
 
     // 6. 插入内容
     editor.replaceSelection(adjustedContent);
@@ -167,7 +218,7 @@ export default class SmartHeadingPastePlugin extends Plugin {
    * 检查文本是否包含 Markdown 标题（排除代码块）
    */
   private containsMarkdownHeadings(text: string): boolean {
-    const lines = text.split('\n');
+    const lines = text.split(/\r\n|\r|\n/);
     let inCodeBlock = false;
 
     for (const line of lines) {
@@ -180,7 +231,7 @@ export default class SmartHeadingPastePlugin extends Plugin {
       }
 
       // 只检查非代码块内的标题（允许前导空格，因为网页复制来的文本常有缩进）
-      if (!inCodeBlock && /^\s*#{1,6}\s+/.test(line)) {
+      if (!inCodeBlock && this.extractHeadingLevel(line) > 0) {
         return true;
       }
     }
@@ -219,12 +270,14 @@ export default class SmartHeadingPastePlugin extends Plugin {
       if (inCodeBlock) continue;
 
       // 匹配标题（允许前导空格）
-      const match = line.match(/^\s*(#{1,6})\s+/);
-      if (match) {
-        return match[1].length;
+      const level = this.extractHeadingLevel(line);
+      if (level > 0) {
+        console.log(`[Smart Heading Paste] 找到上文标题: H${level} at line ${i + 1}: ${line.trim()}`);
+        return level;
       }
     }
 
+    console.log('[Smart Heading Paste] 未找到上文标题，返回文档根');
     return 0; // 无上下文
   }
 
@@ -237,7 +290,7 @@ export default class SmartHeadingPastePlugin extends Plugin {
     maxLevel: number;
     headings: Array<{line: number; level: number; text: string}>;
   } {
-    const lines = content.split('\n');
+    const lines = content.split(/\r\n|\r|\n/);
     let inCodeBlock = false;
     let minLevel = 6;
     let maxLevel = 1;
@@ -256,13 +309,13 @@ export default class SmartHeadingPastePlugin extends Plugin {
 
       // 解析标题（支持代码块内标题根据设置决定是否处理）
       if (!inCodeBlock || !this.settings.skipCodeBlocks) {
-        const match = line.match(/^\s*(#{1,6})\s+(.*)$/);
-        if (match) {
-          const level = match[1].length;
+        const parsedLine = this.parseHeadingLine(line);
+        if (parsedLine) {
+          const level = parsedLine.level;
           hasHeading = true;
           minLevel = Math.min(minLevel, level);
           maxLevel = Math.max(maxLevel, level);
-          headings.push({ line: i, level, text: match[2] });
+          headings.push({ line: i, level, text: parsedLine.content.trim() });
         }
       }
     }
@@ -276,12 +329,15 @@ export default class SmartHeadingPastePlugin extends Plugin {
    * @param skipCodeBlocks 是否跳过代码块内的标题
    */
   private applyHeadingOffset(content: string, offset: number, skipCodeBlocks: boolean): string {
-    if (offset === 0) return content;
+    if (offset === 0) {
+      console.log('[Smart Heading Paste] applyHeadingOffset: 偏移量为0，无需调整');
+      return content;
+    }
 
-    const lines = content.split('\n');
+    const lines = content.split(/\r\n|\r|\n/);
     let inCodeBlock = false;
 
-    return lines.map(line => {
+    return lines.map((line, index) => {
       const trimmed = line.trim();
 
       // 代码块边界
@@ -294,11 +350,11 @@ export default class SmartHeadingPastePlugin extends Plugin {
       if (inCodeBlock && skipCodeBlocks) return line;
 
       // 匹配标题
-      const match = line.match(/^(\s*)(#{1,6})(\s+.*)$/);
-      if (match) {
-        const indent = match[1];
-        const currentLevel = match[2].length;
-        const content = match[3];
+      const parsedLine = this.parseHeadingLine(line);
+      if (parsedLine) {
+        const indent = parsedLine.prefix;
+        const currentLevel = parsedLine.level;
+        const content = parsedLine.content;
 
         // 计算新级别
         let newLevel = currentLevel + offset;
@@ -306,11 +362,43 @@ export default class SmartHeadingPastePlugin extends Plugin {
         // 边界限制
         newLevel = Math.max(1, Math.min(this.settings.maxHeadingLevel, newLevel));
 
-        return indent + '#'.repeat(newLevel) + content;
+        const result = indent + '#'.repeat(newLevel) + content;
+        console.log(`[Smart Heading Paste] 调整第${index + 1}行: H${currentLevel} -> H${newLevel} | ${result.trim()}`);
+        return result;
       }
 
       return line;
     }).join('\n');
+  }
+
+  /**
+   * 从行首提取 ATX 标题级别（1-6），无法识别返回 0
+   */
+  private extractHeadingLevel(line: string): number {
+    const normalized = line.replace(LEADING_NOISE_RE, '');
+    const match = normalized.match(HEADING_LEVEL_FROM_START_RE);
+    return match ? match[1].replace(/＃/g, '#').length : 0;
+  }
+
+  /**
+   * 解析一行标题，返回前缀、级别和标题正文
+   */
+  private parseHeadingLine(line: string): { prefix: string; level: number; content: string } | null {
+    const match = line.match(HEADING_PARSE_RE);
+    if (!match) return null;
+
+    const rest = match[3] ?? '';
+    // If there is trailing content, it should start with whitespace/noise to be
+    // treated as ATX heading text; empty trailing content (e.g. "###") is valid.
+    if (rest.length > 0 && !/^[\s\p{Cf}\p{Zs}]/u.test(rest)) {
+      return null;
+    }
+
+    return {
+      prefix: match[1],
+      level: match[2].replace(/＃/g, '#').length,
+      content: rest,
+    };
   }
 }
 
