@@ -69,6 +69,12 @@ export default class SmartHeadingPastePlugin extends Plugin {
 
   // ==================== 核心粘贴处理器 ====================
   private handlePaste = (event: ClipboardEvent, editor: Editor, view: MarkdownView) => {
+    // 如果其他插件已经处理了粘贴事件，不重复拦截
+    if (event.defaultPrevented) {
+      console.log('Smart Heading Paste: paste event already handled by another plugin');
+      return;
+    }
+
     const clipboardData = event.clipboardData;
     if (!clipboardData) return;
 
@@ -84,6 +90,8 @@ export default class SmartHeadingPastePlugin extends Plugin {
     event.stopPropagation();
 
     const cursor = editor.getCursor();
+
+    console.log('Smart Heading Paste: intercepting paste');
 
     // 执行智能调整
     this.performSmartPaste(editor, pastedText, cursor.line);
@@ -184,24 +192,24 @@ export default class SmartHeadingPastePlugin extends Plugin {
    * 向上查找最近的标题（1-6），没找到返回 0
    */
   private getContextHeadingLevel(editor: Editor, currentLine: number): number {
-    // 检查当前行是否在代码块内
-    let inCodeBlock = false;
-
+    // 先计算到 currentLine 为止，文档中未闭合的代码块深度
+    let fenceCount = 0;
     for (let i = 0; i <= currentLine; i++) {
-      const line = editor.getLine(i);
-      const trimmed = line.trim();
-
+      const trimmed = editor.getLine(i).trim();
       if (trimmed.startsWith('```')) {
-        inCodeBlock = !inCodeBlock;
+        fenceCount++;
       }
     }
+
+    // 如果 fenceCount 为奇数，说明 currentLine 处于一个未闭合的代码块内部
+    let inCodeBlock = (fenceCount % 2 === 1);
 
     // 从当前行向上查找
     for (let i = currentLine; i >= 0; i--) {
       const line = editor.getLine(i);
       const trimmed = line.trim();
 
-      // 跳过代码块标记行
+      // 代码块边界：向上翻越时状态翻转
       if (trimmed.startsWith('```')) {
         inCodeBlock = !inCodeBlock;
         continue;

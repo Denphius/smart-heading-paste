@@ -2,7 +2,7 @@
 /node_modules
 
 # 编译输出
-/main.js
+
 *.js.map
 
 # 环境
