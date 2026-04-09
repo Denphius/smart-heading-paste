@@ -179,8 +179,8 @@ export default class SmartHeadingPastePlugin extends Plugin {
         continue;
       }
 
-      // 只检查非代码块内的标题
-      if (!inCodeBlock && /^#{1,6}\s+/.test(line)) {
+      // 只检查非代码块内的标题（允许前导空格，因为网页复制来的文本常有缩进）
+      if (!inCodeBlock && /^\s*#{1,6}\s+/.test(line)) {
         return true;
       }
     }
@@ -218,8 +218,8 @@ export default class SmartHeadingPastePlugin extends Plugin {
       // 如果在代码块内，跳过标题检测
       if (inCodeBlock) continue;
 
-      // 匹配标题
-      const match = line.match(/^(#{1,6})\s+/);
+      // 匹配标题（允许前导空格）
+      const match = line.match(/^\s*(#{1,6})\s+/);
       if (match) {
         return match[1].length;
       }
@@ -256,7 +256,7 @@ export default class SmartHeadingPastePlugin extends Plugin {
 
       // 解析标题（支持代码块内标题根据设置决定是否处理）
       if (!inCodeBlock || !this.settings.skipCodeBlocks) {
-        const match = line.match(/^(#{1,6})\s+(.*)$/);
+        const match = line.match(/^\s*(#{1,6})\s+(.*)$/);
         if (match) {
           const level = match[1].length;
           hasHeading = true;

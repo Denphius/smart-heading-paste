@@ -137,7 +137,7 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
         inCodeBlock = !inCodeBlock;
         continue;
       }
-      if (!inCodeBlock && /^#{1,6}\s+/.test(line)) {
+      if (!inCodeBlock && /^\s*#{1,6}\s+/.test(line)) {
         return true;
       }
     }
@@ -165,7 +165,7 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
       }
       if (inCodeBlock)
         continue;
-      const match = line.match(/^(#{1,6})\s+/);
+      const match = line.match(/^\s*(#{1,6})\s+/);
       if (match) {
         return match[1].length;
       }
@@ -190,7 +190,7 @@ var SmartHeadingPastePlugin = class extends import_obsidian.Plugin {
         continue;
       }
       if (!inCodeBlock || !this.settings.skipCodeBlocks) {
-        const match = line.match(/^(#{1,6})\s+(.*)$/);
+        const match = line.match(/^\s*(#{1,6})\s+(.*)$/);
         if (match) {
           const level = match[1].length;
           hasHeading = true;
