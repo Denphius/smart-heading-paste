@@ -1,0 +1,9 @@
+{
+  "id": "smart-heading-paste",
+  "name": "Smart Heading Paste",
+  "version": "1.1.0",
+  "minAppVersion": "0.15.0",
+  "description": "粘贴 Markdown 时自动根据上下文调整标题层级，确保结构连贯",
+  "author": "Your Name",
+  "isDesktopOnly": false
+}
